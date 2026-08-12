@@ -30,3 +30,5 @@ try {
 } catch (\PDOException $e) {
     throw new \PDOException($e->getMessage(), (int) $e->getCode());
 }
+
+$api_token = "SECURE_TOKEN";

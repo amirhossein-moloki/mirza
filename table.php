@@ -610,6 +610,57 @@ try {
 }
 $connect->query("ALTER TABLE `user` CHANGE `Processing_value` `Processing_value` TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL;");
 
+//----------------------- [ user_bank_cards ] --------------------- //
+try {
+    $result = $connect->query("SHOW TABLES LIKE 'user_bank_cards'");
+    $table_exists = ($result->num_rows > 0);
+    if (!$table_exists) {
+        $result = $connect->query("CREATE TABLE user_bank_cards (
+        id INT(11) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        user_id varchar(500) NOT NULL,
+        card_number varchar(100) NOT NULL,
+        card_last_four varchar(10) NOT NULL,
+        created_at varchar(100) NOT NULL,
+        status varchar(50) NOT NULL)
+        ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_bin");
+        if (!$result) {
+            echo "table user_bank_cards ".mysqli_error($connect);
+        }
+    }
+} catch (Exception $e) {
+    file_put_contents('error_log', $e->getMessage());
+}
+
+//----------------------- [ payment_auto_verify_logs ] --------------------- //
+try {
+    $result = $connect->query("SHOW TABLES LIKE 'payment_auto_verify_logs'");
+    $table_exists = ($result->num_rows > 0);
+    if (!$table_exists) {
+        $result = $connect->query("CREATE TABLE payment_auto_verify_logs (
+        id INT(11) UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        ref_num varchar(100) NOT NULL,
+        amount INT(11) NOT NULL,
+        source_card varchar(100) NOT NULL,
+        request_data TEXT NOT NULL,
+        status varchar(100) NOT NULL,
+        created_at varchar(100) NOT NULL)
+        ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE utf8mb4_bin");
+        if (!$result) {
+            echo "table payment_auto_verify_logs ".mysqli_error($connect);
+        }
+    }
+} catch (Exception $e) {
+    file_put_contents('error_log', $e->getMessage());
+}
+
+// Ensure Payment_report fields exist
+try {
+    addFieldToTable('Payment_report', 'card_last_four', '', 'VARCHAR(10)');
+    addFieldToTable('Payment_report', 'receipt_file_id', '', 'VARCHAR(1000)');
+} catch (Exception $e) {
+    file_put_contents('error_log', $e->getMessage());
+}
+
 //----------------------- [ Category ] --------------------- //
 try {
     $result = $connect->query("SHOW TABLES LIKE 'category'");
