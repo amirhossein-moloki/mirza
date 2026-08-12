@@ -434,8 +434,9 @@ if ($table_exists) {
 }
 $payment = json_encode([
     'inline_keyboard' => [
-        [['text' => $textbotlang['users']['buy']['payandGet'], 'callback_data' => "confirmandgetservice"]],
-        [['text' => $textbotlang['users']['buy']['discount'], 'callback_data' => "aptdc"]],
+        [['text' => '💳 انتخاب روش پرداخت', 'callback_data' => 'none']],
+        [['text' => '⚡ پرداخت با تایید خودکار', 'callback_data' => 'pay_auto_verify']],
+        [['text' => '🧾 پرداخت با ارسال رسید', 'callback_data' => 'pay_manual_receipt']],
         [['text' => $textbotlang['users']['backhome'], 'callback_data' => "backuser"]]
     ]
 ]);

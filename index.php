@@ -1932,10 +1932,270 @@ if ($text == $datatextbot['text_sell'] || $datain == "buy" || $text == "/buy") {
         sendmessage($setting['Channel_Report'], $text_report, null, 'HTML');
     }
     step('home', $from_id);
+} elseif ($datain == "pay_auto_verify") {
+    $stmt = $pdo->prepare("SELECT * FROM user_bank_cards WHERE user_id = ? AND status = 'active'");
+    $stmt->execute([$from_id]);
+    $cards = $stmt->fetchAll();
+
+    if (empty($cards)) {
+        $inline_keyboard = [
+            [['text' => "➕ ثبت کارت بانکی", 'callback_data' => "register_new_card"]],
+            [['text' => $textbotlang['users']['backhome'], 'callback_data' => "backuser"]]
+        ];
+        $msg = "برای استفاده از تایید خودکار، ابتدا کارت بانکی خود را ثبت کنید.";
+        Editmessagetext($from_id, $message_id, $msg, json_encode(['inline_keyboard' => $inline_keyboard]));
+    } else {
+        $inline_keyboard = [];
+        foreach ($cards as $card) {
+            $masked = substr($card['card_number'], 0, 4) . " **** **** " . $card['card_last_four'];
+            $inline_keyboard[] = [
+                ['text' => "💳 " . $masked, 'callback_data' => "select_card_" . $card['id']],
+                ['text' => "❌", 'callback_data' => "delete_card_" . $card['id']]
+            ];
+        }
+        $inline_keyboard[] = [['text' => "➕ ثبت کارت جدید", 'callback_data' => "register_new_card"]];
+        $inline_keyboard[] = [['text' => $textbotlang['users']['backhome'], 'callback_data' => "backuser"]];
+
+        $msg = "💳 کارت‌های ثبت شده:";
+        Editmessagetext($from_id, $message_id, $msg, json_encode(['inline_keyboard' => $inline_keyboard]));
+    }
+} elseif ($datain == "register_new_card") {
+    step('waiting_for_card_number', $from_id);
+    Editmessagetext($from_id, $message_id, "برای استفاده از تایید خودکار، ابتدا کارت بانکی خود را ثبت کنید.\n\n➕ ثبت کارت بانکی\n\nلطفاً شماره کارت ۱۶ رقمی خود را بدون فاصله و حروف اضافی وارد کنید:", json_encode([
+        'inline_keyboard' => [
+            [['text' => "🔙 بازگشت", 'callback_data' => "pay_auto_verify"]]
+        ]
+    ]));
+} elseif (preg_match('/^select_card_(\d+)$/', $datain, $matches)) {
+    $card_id = $matches[1];
+
+    // Get the card details
+    $stmt = $pdo->prepare("SELECT * FROM user_bank_cards WHERE id = ? AND user_id = ? AND status = 'active' LIMIT 1");
+    $stmt->execute([$card_id, $from_id]);
+    $card = $stmt->fetch();
+
+    if (!$card) {
+        sendmessage($from_id, "❌ خطایی رخ داده است. کارت یافت نشد.", null, 'HTML');
+        return;
+    }
+
+    $is_direct_purchase = ($user['step'] == "payment");
+    $amount = 0;
+    $payment_report_invoice = "0|0";
+
+    if ($is_direct_purchase) {
+        $stmt = $pdo->prepare("SELECT * FROM product WHERE code_product = :code AND (location = :loc1 OR location = '/all') LIMIT 1");
+        $stmt->bindValue(':code', $user['Processing_value_one']);
+        $stmt->bindValue(':loc1', $user['Processing_value']);
+        $stmt->execute();
+        $info_product = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        $marzban_list_get = select("marzban_panel", "*", "name_panel", $user['Processing_value'], "select");
+
+        $priceproduct = $info_product['price_product'];
+        if (strpos($user['Processing_value_four'], "dis_") === 0) {
+            $partsdic = explode("_", $user['Processing_value_four']);
+            $priceproduct = $partsdic[2];
+        }
+
+        $username_ac = $user['Processing_value_tow'];
+        $random_invoice_id = bin2hex(random_bytes(4));
+        $date_now = time();
+        $status_unpaid = "unpaid";
+
+        $stmt_inv = $pdo->prepare("INSERT IGNORE INTO invoice (id_user, id_invoice, username, time_sell, Service_location, name_product, price_product, Volume, Service_time, Status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt_inv->execute([$from_id, $random_invoice_id, $username_ac, $date_now, $marzban_list_get['name_panel'], $info_product['name_product'], $priceproduct, $info_product['Volume_constraint'], $info_product['Service_time'], $status_unpaid]);
+
+        $payment_report_invoice = "getconfigafterpay|" . $username_ac;
+        $amount = intval($priceproduct);
+    } else {
+        $amount = intval($user['Processing_value']);
+    }
+
+    if ($amount <= 0) {
+        sendmessage($from_id, "❌ خطایی در محاسبه مبلغ رخ داده است.", null, 'HTML');
+        return;
+    }
+
+    // Get destination card
+    $destination_card = select("PaySetting", "ValuePay", "NamePay", "CartDescription", "select")['ValuePay'];
+    if (empty($destination_card)) {
+        $destination_card = "۶۰۳۷ **** **** ****";
+    }
+
+    // Create payment
+    $order_id = bin2hex(random_bytes(5));
+    $dateacc = date('Y/m/d H:i:s');
+    $payment_Status = "unpaid";
+    $Payment_Method = "auto_card_to_card";
+
+    $stmt = $pdo->prepare("INSERT INTO Payment_report (id_user, id_order, time, price, payment_Status, Payment_Method, invoice, card_last_four) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    $stmt->execute([$from_id, $order_id, $dateacc, $amount, $payment_Status, $Payment_Method, $payment_report_invoice, $card['card_last_four']]);
+
+    // Display payment information
+    $formatted_amount = number_format($amount);
+
+    $msg = "⚡ پرداخت شما در انتظار تایید خودکار است.\n\n" .
+           "پس از تایید بانک،\nسرویس شما فعال خواهد شد.\n\n" .
+           "💰 مبلغ: " . $formatted_amount . " تومان\n" .
+           "💳 کارت مقصد: " . $destination_card . "\n\n" .
+           "پس از واریز، پرداخت شما به صورت خودکار تایید می‌شود.";
+
+    Editmessagetext($from_id, $message_id, $msg, json_encode([
+        'inline_keyboard' => [
+            [['text' => $textbotlang['users']['backhome'], 'callback_data' => "backuser"]]
+        ]
+    ]));
+} elseif ($datain == "pay_manual_receipt") {
+    $is_direct_purchase = ($user['step'] == "payment");
+    $amount = 0;
+    $payment_report_invoice = "0|0";
+
+    if ($is_direct_purchase) {
+        $stmt = $pdo->prepare("SELECT * FROM product WHERE code_product = :code AND (location = :loc1 OR location = '/all') LIMIT 1");
+        $stmt->bindValue(':code', $user['Processing_value_one']);
+        $stmt->bindValue(':loc1', $user['Processing_value']);
+        $stmt->execute();
+        $info_product = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        $marzban_list_get = select("marzban_panel", "*", "name_panel", $user['Processing_value'], "select");
+
+        $priceproduct = $info_product['price_product'];
+        if (strpos($user['Processing_value_four'], "dis_") === 0) {
+            $partsdic = explode("_", $user['Processing_value_four']);
+            $priceproduct = $partsdic[2];
+        }
+
+        $username_ac = $user['Processing_value_tow'];
+        $random_invoice_id = bin2hex(random_bytes(4));
+        $date_now = time();
+        $status_unpaid = "unpaid";
+
+        $stmt_inv = $pdo->prepare("INSERT IGNORE INTO invoice (id_user, id_invoice, username, time_sell, Service_location, name_product, price_product, Volume, Service_time, Status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt_inv->execute([$from_id, $random_invoice_id, $username_ac, $date_now, $marzban_list_get['name_panel'], $info_product['name_product'], $priceproduct, $info_product['Volume_constraint'], $info_product['Service_time'], $status_unpaid]);
+
+        $payment_report_invoice = "getconfigafterpay|" . $username_ac;
+        $amount = intval($priceproduct);
+    } else {
+        $amount = intval($user['Processing_value']);
+    }
+
+    if ($amount <= 0) {
+        sendmessage($from_id, "❌ خطایی در محاسبه مبلغ رخ داده است.", null, 'HTML');
+        return;
+    }
+
+    // Get destination card
+    $destination_card = select("PaySetting", "ValuePay", "NamePay", "CartDescription", "select")['ValuePay'];
+    if (empty($destination_card)) {
+        $destination_card = "۶۰۳۷ **** **** ****";
+    }
+
+    // Create payment
+    $order_id = bin2hex(random_bytes(5));
+    $dateacc = date('Y/m/d H:i:s');
+    $payment_Status = "pending_review";
+    $Payment_Method = "manual_receipt";
+
+    update("user", "Processing_value_tow", $order_id, "id", $from_id);
+
+    $stmt = $pdo->prepare("INSERT INTO Payment_report (id_user, id_order, time, price, payment_Status, Payment_Method, invoice) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    $stmt->execute([$from_id, $order_id, $dateacc, $amount, $payment_Status, $Payment_Method, $payment_report_invoice]);
+
+    step('waiting_for_manual_receipt', $from_id);
+
+    $formatted_amount = number_format($amount);
+    $msg = "💰 مبلغ:\n" . $formatted_amount . " تومان\n\n" .
+           "💳 کارت مقصد:\n" . $destination_card . "\n\n" .
+           "لطفاً تصویر رسید پرداخت را ارسال کنید.";
+
+    Editmessagetext($from_id, $message_id, $msg, json_encode([
+        'inline_keyboard' => [
+            [['text' => "🔙 انصراف", 'callback_data' => "backuser"]]
+        ]
+    ]));
+} elseif (preg_match('/^delete_card_(\d+)$/', $datain, $matches)) {
+    $card_id = $matches[1];
+    $stmt = $pdo->prepare("UPDATE user_bank_cards SET status = 'deleted' WHERE id = ? AND user_id = ?");
+    $stmt->execute([$card_id, $from_id]);
+
+    // Refresh card list
+    $stmt = $pdo->prepare("SELECT * FROM user_bank_cards WHERE user_id = ? AND status = 'active'");
+    $stmt->execute([$from_id]);
+    $cards = $stmt->fetchAll();
+
+    if (empty($cards)) {
+        $inline_keyboard = [
+            [['text' => "➕ ثبت کارت بانکی", 'callback_data' => "register_new_card"]],
+            [['text' => $textbotlang['users']['backhome'], 'callback_data' => "backuser"]]
+        ];
+        $msg = "برای استفاده از تایید خودکار، ابتدا کارت بانکی خود را ثبت کنید.";
+        Editmessagetext($from_id, $message_id, $msg, json_encode(['inline_keyboard' => $inline_keyboard]));
+    } else {
+        $inline_keyboard = [];
+        foreach ($cards as $card) {
+            $masked = substr($card['card_number'], 0, 4) . " **** **** " . $card['card_last_four'];
+            $inline_keyboard[] = [
+                ['text' => "💳 " . $masked, 'callback_data' => "select_card_" . $card['id']],
+                ['text' => "❌", 'callback_data' => "delete_card_" . $card['id']]
+            ];
+        }
+        $inline_keyboard[] = [['text' => "➕ ثبت کارت جدید", 'callback_data' => "register_new_card"]];
+        $inline_keyboard[] = [['text' => $textbotlang['users']['backhome'], 'callback_data' => "backuser"]];
+
+        $msg = "💳 کارت‌های ثبت شده:";
+        Editmessagetext($from_id, $message_id, $msg, json_encode(['inline_keyboard' => $inline_keyboard]));
+    }
 } elseif ($datain == "aptdc") {
     sendmessage($from_id, $textbotlang['users']['Discount']['getcodesell'], $backuser, 'HTML');
     step('getcodesellDiscount', $from_id);
     deletemessage($from_id, $message_id);
+} elseif ($user['step'] == "waiting_for_card_number") {
+    if ($text == "/start") {
+        update("user", "Processing_value", "0", "id", $from_id);
+        update("user", "Processing_value_one", "0", "id", $from_id);
+        update("user", "Processing_value_tow", "0", "id", $from_id);
+        sendmessage($from_id, $datatextbot['text_start'], $keyboard, 'html');
+        step('home', $from_id);
+        return;
+    }
+
+    // Normalize card digits
+    $card_num = preg_replace('/\D/', '', $text);
+    if (strlen($card_num) != 16) {
+        sendmessage($from_id, "❌ شماره کارت باید دقیقاً ۱۶ رقم باشد. لطفاً مجدداً شماره کارت معتبر ارسال کنید یا دکمه زیر را برای لغو بزنید:", json_encode([
+            'inline_keyboard' => [
+                [['text' => "🔙 لغو", 'callback_data' => "pay_auto_verify"]]
+            ]
+        ]), 'HTML');
+        return;
+    }
+
+    $last_four = substr($card_num, -4);
+    $stmt = $pdo->prepare("INSERT INTO user_bank_cards (user_id, card_number, card_last_four, created_at, status) VALUES (?, ?, ?, ?, ?)");
+    $stmt->execute([$from_id, $card_num, $last_four, time(), 'active']);
+
+    sendmessage($from_id, "✅ کارت بانکی شما با موفقیت ثبت شد.", null, 'HTML');
+
+    // Show cards list again
+    $stmt = $pdo->prepare("SELECT * FROM user_bank_cards WHERE user_id = ? AND status = 'active'");
+    $stmt->execute([$from_id]);
+    $cards = $stmt->fetchAll();
+
+    $inline_keyboard = [];
+    foreach ($cards as $card) {
+        $masked = substr($card['card_number'], 0, 4) . " **** **** " . $card['card_last_four'];
+        $inline_keyboard[] = [
+            ['text' => "💳 " . $masked, 'callback_data' => "select_card_" . $card['id']],
+            ['text' => "❌", 'callback_data' => "delete_card_" . $card['id']]
+        ];
+    }
+    $inline_keyboard[] = [['text' => "➕ ثبت کارت جدید", 'callback_data' => "register_new_card"]];
+    $inline_keyboard[] = [['text' => $textbotlang['users']['backhome'], 'callback_data' => "backuser"]];
+
+    sendmessage($from_id, "💳 کارت‌های ثبت شده:", json_encode(['inline_keyboard' => $inline_keyboard]), 'HTML');
+    step('payment', $from_id);
+    return;
 } elseif ($user['step'] == "getcodesellDiscount") {
     if (!in_array($text, $SellDiscount)) {
         sendmessage($from_id, $textbotlang['users']['Discount']['notcode'], $backuser, 'HTML');
@@ -2254,6 +2514,53 @@ if (preg_match('/Confirmpay_user_(\w+)_(\w+)/', $datain, $dataget)) {
             )
         );
     }
+} elseif ($user['step'] == "waiting_for_manual_receipt") {
+    if (!$photo) {
+        sendmessage($from_id, $textbotlang['users']['Balance']['Invalid-receipt'], null, 'HTML');
+        return;
+    }
+
+    $payment_id = $user['Processing_value_tow'];
+    if (empty($payment_id)) {
+        sendmessage($from_id, "❌ خطایی رخ داده است. مجدداً تلاش کنید.", null, 'HTML');
+        return;
+    }
+
+    // Save photo to Payment_report
+    $stmt = $pdo->prepare("UPDATE Payment_report SET receipt_file_id = ?, payment_Status = 'pending_review' WHERE id_order = ?");
+    $stmt->execute([$photoid, $payment_id]);
+
+    // Send success message to user (Section 12)
+    $msg_success = "🧾 رسید شما دریافت شد.\n\n" .
+                   "پس از بررسی مدیریت،\n" .
+                   "نتیجه اعلام خواهد شد.";
+    sendmessage($from_id, $msg_success, $keyboard, 'HTML');
+
+    // Forward to admins
+    $Confirm_pay = json_encode([
+        'inline_keyboard' => [
+            [
+                ['text' => $textbotlang['users']['Balance']['Confirmpaying'], 'callback_data' => "Confirm_pay_{$payment_id}"],
+                ['text' => $textbotlang['users']['Balance']['reject_pay'], 'callback_data' => "reject_pay_{$payment_id}"],
+            ]
+        ]
+    ]);
+
+    $payment = select("Payment_report", "*", "id_order", $payment_id, "select");
+    $formatted_price = number_format($payment['price']);
+    $textsendrasid = sprintf($textbotlang['users']['moeny']['cartresid'], $from_id, $payment_id, $username, $formatted_price, $caption);
+
+    foreach ($admin_ids as $id_admin) {
+        telegram('sendphoto', [
+            'chat_id' => $id_admin,
+            'photo' => $photoid,
+            'reply_markup' => $Confirm_pay,
+            'caption' => $textsendrasid,
+            'parse_mode' => "HTML",
+        ]);
+    }
+    step('home', $from_id);
+    return;
 } elseif ($user['step'] == "cart_to_cart_user") {
     if (!$photo) {
         sendmessage($from_id, $textbotlang['users']['Balance']['Invalid-receipt'], null, 'HTML');

@@ -768,6 +768,11 @@ if (preg_match('/Confirm_pay_(\w+)/', $datain, $dataget)) {
         return;
     }
     DirectPayment($order_id);
+
+    if (strpos($Payment_report['invoice'], "getconfigafterpay") === 0) {
+        sendmessage($Payment_report['id_user'], "✅ پرداخت تایید شد.\n\nسرویس شما فعال گردید.", null, 'HTML');
+    }
+
     $keyboard_accept = json_encode([
         'inline_keyboard' => [
             [
