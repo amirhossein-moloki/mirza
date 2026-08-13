@@ -2105,9 +2105,42 @@ if ($text == $datatextbot['text_sell'] || $datain == "buy" || $text == "/buy") {
     step('waiting_for_manual_receipt', $from_id);
 
     $formatted_amount = number_format($amount);
-    $msg = "💰 مبلغ:\n" . $formatted_amount . " تومان\n\n" .
-           "💳 کارت مقصد:\n" . $destination_card . "\n\n" .
-           "لطفاً تصویر رسید پرداخت را ارسال کنید.";
+    if ($is_direct_purchase) {
+        $volume = $info_product['Volume_constraint'];
+        if ($volume == 0 || $volume == "نامحدود") {
+            $volume_text = $textbotlang['users']['status']['Unlimited'];
+        } else {
+            $volume_text = (strpos($volume, "گیگ") !== false) ? $volume : $volume . " گیگ";
+        }
+        $balance_text = number_format($user['Balance']);
+        $price_product_text = number_format($priceproduct);
+
+        $msg = "📇 پیش فاکتور شما:\n" .
+               "👤 نام کاربری: <code>" . $username_ac . "</code>\n" .
+               "🔐 نام سرویس: " . $info_product['name_product'] . "\n" .
+               "📆 مدت اعتبار: " . $info_product['Service_time'] . " روز\n" .
+               "💶 قیمت: " . $price_product_text . " تومان\n" .
+               "👥 حجم اکانت: " . $volume_text . "\n" .
+               "💵 موجودی کیف پول شما : " . $balance_text . "\n\n" .
+               "💰 سفارش شما آماده پرداخت است.\n\n" .
+               "برای افزایش موجودی به صورت دستی، مبلغ " . $formatted_amount . "  تومان  را به شماره‌ی حساب زیر واریز کنید 👇🏻\n\n" .
+               "    ==================== \n" .
+               "    " . $destination_card . "\n" .
+               "    ====================\n\n" .
+               "🌅 عکس رسید خود را در این مرحله ارسال نمایید. \n\n" .
+               "⚠️ حداکثر واریز مبلغ 10 میلیون تومان می باشد.\n" .
+               "⚠️ امکان برداشت وجه از کیف پول  نیست.\n" .
+               "⚠️ مسئولیت واریز اشتباهی با شماست.";
+    } else {
+        $msg = "برای افزایش موجودی به صورت دستی، مبلغ " . $formatted_amount . "  تومان  را به شماره‌ی حساب زیر واریز کنید 👇🏻\n\n" .
+               "    ==================== \n" .
+               "    " . $destination_card . "\n" .
+               "    ====================\n\n" .
+               "🌅 عکس رسید خود را در این مرحله ارسال نمایید. \n\n" .
+               "⚠️ حداکثر واریز مبلغ 10 میلیون تومان می باشد.\n" .
+               "⚠️ امکان برداشت وجه از کیف پول  نیست.\n" .
+               "⚠️ مسئولیت واریز اشتباهی با شماست.";
+    }
 
     Editmessagetext($from_id, $message_id, $msg, json_encode([
         'inline_keyboard' => [
@@ -2277,7 +2310,47 @@ if ($text == $datatextbot['text_Add_Balance'] || $text == "/wallet") {
     if ($datain == "cart_to_offline") {
         $PaySetting = select("PaySetting", "ValuePay", "NamePay", "CartDescription", "select")['ValuePay'];
         $Processing_value = number_format($user['Processing_value']);
-        $textcart = sprintf($textbotlang['users']['moeny']['carttext'], $Processing_value, $PaySetting);
+        $is_direct_purchase = (trim($user['Processing_value_tow']) == "getconfigafterpay");
+        $invoice_info = null;
+        if ($is_direct_purchase) {
+            $stmt = $pdo->prepare("SELECT * FROM invoice WHERE id_user = ? AND Status = 'unpaid' ORDER BY id DESC LIMIT 1");
+            $stmt->execute([$from_id]);
+            $invoice_info = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+
+        if ($is_direct_purchase && $invoice_info) {
+            $username_ac = $invoice_info['username'];
+            $service_name = $invoice_info['name_product'];
+            $service_time = $invoice_info['Service_time'];
+            $price_product = number_format($invoice_info['price_product']);
+            $volume = $invoice_info['Volume'];
+            if ($volume == 0 || $volume == "نامحدود") {
+                $volume_text = $textbotlang['users']['status']['Unlimited'];
+            } else {
+                $volume_text = (strpos($volume, "گیگ") !== false) ? $volume : $volume . " گیگ";
+            }
+            $balance_text = number_format($user['Balance']);
+            $transfer_amount_text = number_format($user['Processing_value']);
+
+            $textcart = "📇 پیش فاکتور شما:\n" .
+                        "👤 نام کاربری: <code>" . $username_ac . "</code>\n" .
+                        "🔐 نام سرویس: " . $service_name . "\n" .
+                        "📆 مدت اعتبار: " . $service_time . " روز\n" .
+                        "💶 قیمت: " . $price_product . " تومان\n" .
+                        "👥 حجم اکانت: " . $volume_text . "\n" .
+                        "💵 موجودی کیف پول شما : " . $balance_text . "\n\n" .
+                        "💰 سفارش شما آماده پرداخت است.\n\n" .
+                        "برای افزایش موجودی به صورت دستی، مبلغ " . $transfer_amount_text . "  تومان  را به شماره‌ی حساب زیر واریز کنید 👇🏻\n\n" .
+                        "    ==================== \n" .
+                        "    " . $PaySetting . "\n" .
+                        "    ====================\n\n" .
+                        "🌅 عکس رسید خود را در این مرحله ارسال نمایید. \n\n" .
+                        "⚠️ حداکثر واریز مبلغ 10 میلیون تومان می باشد.\n" .
+                        "⚠️ امکان برداشت وجه از کیف پول  نیست.\n" .
+                        "⚠️ مسئولیت واریز اشتباهی با شماست.";
+        } else {
+            $textcart = sprintf($textbotlang['users']['moeny']['carttext'], $Processing_value, $PaySetting);
+        }
         preg_match_all('/\d+/', $PaySetting, $Matches);
         if (!empty($Matches[0]) && intval($setting['copy_cart']) == 1) {
             $peymentSettings['card_number'] = implode('', $Matches[0]);
