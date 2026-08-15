@@ -566,6 +566,92 @@ function isBase64($string)
     return false;
 }
 
+function createInvoiceVersion($pdo, $id_user, $id_order, $username, $service_location, $name_product, $price_product, $volume, $service_time, $status = 'active', $discount_amount = '0', $discount_code = null)
+{
+    $time_now = time();
+
+    // Determine version and supersede previous active invoices for this order/username
+    $max_ver = 0;
+    if (!empty($id_order)) {
+        $stmt_prev = $pdo->prepare("SELECT MAX(version) FROM invoice WHERE id_order = ?");
+        $stmt_prev->execute([$id_order]);
+        $max_ver = (int)$stmt_prev->fetchColumn();
+
+        $stmt_sup = $pdo->prepare("UPDATE invoice SET Status = 'superseded' WHERE id_order = ? AND Status = 'active'");
+        $stmt_sup->execute([$id_order]);
+    }
+    if ($max_ver === 0 && !empty($username)) {
+        $stmt_prev = $pdo->prepare("SELECT MAX(version) FROM invoice WHERE username = ?");
+        $stmt_prev->execute([$username]);
+        $max_ver = (int)$stmt_prev->fetchColumn();
+
+        $stmt_sup = $pdo->prepare("UPDATE invoice SET Status = 'superseded' WHERE username = ? AND Status = 'active'");
+        $stmt_sup->execute([$username]);
+    }
+
+    $new_version = $max_ver + 1;
+    $id_invoice = bin2hex(random_bytes(4));
+
+    $sql = "INSERT INTO invoice (id_invoice, id_order, version, discount_amount, discount_code, id_user, username, Service_location, time_sell, name_product, price_product, Volume, Service_time, Status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([
+        $id_invoice,
+        $id_order,
+        $new_version,
+        (string)$discount_amount,
+        $discount_code,
+        $id_user,
+        $username,
+        $service_location,
+        (string)$time_now,
+        $name_product,
+        (string)$price_product,
+        (string)$volume,
+        (string)$service_time,
+        $status
+    ]);
+
+    return [
+        'id_invoice' => $id_invoice,
+        'id_order' => $id_order,
+        'version' => $new_version,
+        'discount_amount' => (string)$discount_amount,
+        'discount_code' => $discount_code,
+        'id_user' => $id_user,
+        'username' => $username,
+        'Service_location' => $service_location,
+        'time_sell' => (string)$time_now,
+        'name_product' => $name_product,
+        'price_product' => (string)$price_product,
+        'Volume' => (string)$volume,
+        'Service_time' => (string)$service_time,
+        'Status' => $status
+    ];
+}
+
+function getActiveInvoiceForOrder($pdo, $id_order = null, $username = null, $id_user = null)
+{
+    if (!empty($id_order)) {
+        $stmt = $pdo->prepare("SELECT * FROM invoice WHERE id_order = ? AND Status = 'active' ORDER BY version DESC LIMIT 1");
+        $stmt->execute([$id_order]);
+        $inv = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($inv) return $inv;
+    }
+    if (!empty($username)) {
+        $stmt = $pdo->prepare("SELECT * FROM invoice WHERE username = ? AND Status = 'active' ORDER BY version DESC LIMIT 1");
+        $stmt->execute([$username]);
+        $inv = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($inv) return $inv;
+    }
+    if (!empty($id_user)) {
+        $stmt = $pdo->prepare("SELECT * FROM invoice WHERE id_user = ? AND Status = 'active' ORDER BY version DESC LIMIT 1");
+        $stmt->execute([$id_user]);
+        $inv = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($inv) return $inv;
+    }
+    return null;
+}
+
 function processAutoVerifyPayment($pdo, $data)
 {
     global $api_token;
@@ -603,14 +689,59 @@ function processAutoVerifyPayment($pdo, $data)
             return ['http_code' => 400, 'response' => ['status' => 'error', 'message' => 'Duplicate transaction']];
         }
 
-        // 2. Select earliest valid unpaid pending purchase request for destination card
-        $stmt_payment = $pdo->prepare("SELECT * FROM Payment_report WHERE Payment_Method = 'auto_card_to_card' AND payment_Status = 'unpaid' AND card_last_four = ? ORDER BY id ASC LIMIT 1" . $forUpdate);
+        // 2. Select pending payment requests for destination card
+        $stmt_payment = $pdo->prepare("SELECT * FROM Payment_report WHERE Payment_Method = 'auto_card_to_card' AND payment_Status = 'unpaid' AND card_last_four = ? ORDER BY id ASC" . $forUpdate);
         $stmt_payment->execute([$source_card_last_four]);
-        $payment = $stmt_payment->fetch(PDO::FETCH_ASSOC);
+        $all_candidates = $stmt_payment->fetchAll(PDO::FETCH_ASSOC);
 
-        if (!$payment) {
+        $valid_candidates = [];
+        foreach ($all_candidates as $cand) {
+            $inv = null;
+            $has_explicit_id = !empty($cand['id_invoice']);
+
+            if ($has_explicit_id) {
+                $stmt_inv = $pdo->prepare("SELECT * FROM invoice WHERE id_invoice = ? LIMIT 1");
+                $stmt_inv->execute([$cand['id_invoice']]);
+                $inv = $stmt_inv->fetch(PDO::FETCH_ASSOC);
+
+                if (!$inv || $inv['Status'] !== 'active') {
+                    continue;
+                }
+            } else {
+                if (!empty($cand['id_order'])) {
+                    $stmt_inv = $pdo->prepare("SELECT * FROM invoice WHERE id_order = ? AND Status = 'active' ORDER BY version DESC LIMIT 1");
+                    $stmt_inv->execute([$cand['id_order']]);
+                    $inv = $stmt_inv->fetch(PDO::FETCH_ASSOC);
+                }
+                if (!$inv && !empty($cand['invoice']) && strpos($cand['invoice'], 'getconfigafterpay|') === 0) {
+                    $parts = explode('|', $cand['invoice']);
+                    $username_ac = $parts[1] ?? '';
+                    if ($username_ac) {
+                        $stmt_inv = $pdo->prepare("SELECT * FROM invoice WHERE username = ? AND Status = 'active' ORDER BY version DESC LIMIT 1");
+                        $stmt_inv->execute([$username_ac]);
+                        $inv = $stmt_inv->fetch(PDO::FETCH_ASSOC);
+                    }
+                }
+            }
+
+            if ($inv && $inv['Status'] === 'active') {
+                $valid_candidates[] = [
+                    'payment' => $cand,
+                    'invoice' => $inv,
+                    'expected_amount' => intval($inv['price_product'])
+                ];
+            } elseif (!$has_explicit_id && (!isset($cand['invoice']) || $cand['invoice'] === '0|0')) {
+                $valid_candidates[] = [
+                    'payment' => $cand,
+                    'invoice' => null,
+                    'expected_amount' => intval($cand['price'])
+                ];
+            }
+        }
+
+        if (empty($valid_candidates)) {
             // Unmatched / Ambiguous payment
-            $audit_note = "Payment unmatched: No unpaid pending purchase request found for card $source_card_last_four. Payment preserved and not assigned to any account.";
+            $audit_note = "Payment unmatched: No unpaid pending purchase request with active invoice found for card $source_card_last_four. Payment preserved and not assigned to any account.";
             $stmt_log = $pdo->prepare("INSERT INTO payment_auto_verify_logs (ref_num, amount, source_card, request_data, status, created_at, audit_note) VALUES (?, ?, ?, ?, 'unmatched', ?, ?)");
             $stmt_log->execute([$ref_num, $amount, $source_card_last_four, $raw_input, (string)$timestamp, $audit_note]);
             $pdo->commit();
@@ -618,20 +749,34 @@ function processAutoVerifyPayment($pdo, $data)
             return ['http_code' => 404, 'response' => ['status' => 'error', 'message' => 'No matching unpaid payment found']];
         }
 
-        $expected_amount = intval($payment['price']);
-        $user_id = $payment['id_user'];
-        $order_id = $payment['id_order'];
+        // Exact amount match check
+        $exact_match = null;
+        foreach ($valid_candidates as $vc) {
+            if ($vc['expected_amount'] === $amount) {
+                $exact_match = $vc;
+                break;
+            }
+        }
 
-        if ($amount === $expected_amount) {
-            // Exact Amount Match
-            $stmt_update = $pdo->prepare("UPDATE Payment_report SET payment_Status = 'paid' WHERE id_order = ?");
-            $stmt_update->execute([$order_id]);
+        if ($exact_match) {
+            $selected_payment = $exact_match['payment'];
+            $selected_invoice = $exact_match['invoice'];
+            $expected_amount = $exact_match['expected_amount'];
+            $user_id = $selected_payment['id_user'];
+            $order_id = $selected_payment['id_order'];
 
-            // Approve purchase
+            $stmt_update = $pdo->prepare("UPDATE Payment_report SET payment_Status = 'paid' WHERE id = ?");
+            $stmt_update->execute([$selected_payment['id']]);
+
+            if ($selected_invoice) {
+                $stmt_inv_up = $pdo->prepare("UPDATE invoice SET Status = 'paid' WHERE id_invoice = ?");
+                $stmt_inv_up->execute([$selected_invoice['id_invoice']]);
+            }
+
             DirectPayment($order_id);
 
-            // Audit Trail
-            $audit_note = "Assigned payment $ref_num to Purchase #$order_id (User $user_id) based on earliest pending request rule for card $source_card_last_four. Exact amount match ($amount). Real payer identity not verified.";
+            $inv_ver_str = $selected_invoice ? " (Invoice Version #{$selected_invoice['version']} ID {$selected_invoice['id_invoice']})" : "";
+            $audit_note = "Assigned payment $ref_num to Purchase #$order_id (User $user_id)$inv_ver_str based on earliest pending request rule for card $source_card_last_four. Exact amount match ($amount). Real payer identity not verified.";
             $stmt_log = $pdo->prepare("INSERT INTO payment_auto_verify_logs (ref_num, amount, source_card, request_data, status, created_at, selected_order_id, user_id, expected_amount, amount_matched, purchase_approved, topup_created, credited_amount, audit_note) VALUES (?, ?, ?, ?, 'success', ?, ?, ?, ?, 1, 1, 0, 0, ?)");
             $stmt_log->execute([$ref_num, $amount, $source_card_last_four, $raw_input, (string)$timestamp, $order_id, $user_id, $expected_amount, $audit_note]);
 
@@ -639,11 +784,17 @@ function processAutoVerifyPayment($pdo, $data)
 
             return ['http_code' => 200, 'response' => ['status' => 'success', 'message' => 'Payment verified and purchase approved successfully']];
         } else {
-            // Amount Mismatch
-            $stmt_update = $pdo->prepare("UPDATE Payment_report SET payment_Status = 'amount_mismatch' WHERE id_order = ?");
-            $stmt_update->execute([$order_id]);
+            // Amount Mismatch: select earliest candidate
+            $mismatch_candidate = $valid_candidates[0];
+            $selected_payment = $mismatch_candidate['payment'];
+            $selected_invoice = $mismatch_candidate['invoice'];
+            $expected_amount = $mismatch_candidate['expected_amount'];
+            $user_id = $selected_payment['id_user'];
+            $order_id = $selected_payment['id_order'];
 
-            // Credit FULL actual payment amount to user's balance
+            $stmt_update = $pdo->prepare("UPDATE Payment_report SET payment_Status = 'amount_mismatch' WHERE id = ?");
+            $stmt_update->execute([$selected_payment['id']]);
+
             $stmt_user = $pdo->prepare("SELECT Balance FROM user WHERE id = ?" . $forUpdate);
             $stmt_user->execute([$user_id]);
             $current_balance = intval($stmt_user->fetchColumn());
@@ -652,13 +803,12 @@ function processAutoVerifyPayment($pdo, $data)
             $stmt_bal = $pdo->prepare("UPDATE user SET Balance = ? WHERE id = ?");
             $stmt_bal->execute([$new_balance, $user_id]);
 
-            // Confirm Automatic Top-Up
             $formatted_amount = number_format($amount);
             $msg = "⚡ مبلغ " . $formatted_amount . " تومان به حساب شما واریز شد (شارژ خودکار حساب).";
             sendmessage($user_id, $msg, null, 'HTML');
 
-            // Audit Trail
-            $audit_note = "Assigned payment $ref_num to Purchase #$order_id (User $user_id) based on earliest pending request rule for card $source_card_last_four. Amount mismatch: expected $expected_amount, received $amount. Purchase not approved; full actual amount ($amount) credited to user balance. Real payer identity not verified.";
+            $inv_ver_str = $selected_invoice ? " (Invoice Version #{$selected_invoice['version']} ID {$selected_invoice['id_invoice']})" : "";
+            $audit_note = "Assigned payment $ref_num to Purchase #$order_id (User $user_id)$inv_ver_str based on earliest pending request rule for card $source_card_last_four. Amount mismatch: expected $expected_amount, received $amount. Purchase not approved; full actual amount ($amount) credited to user balance. Real payer identity not verified.";
             $stmt_log = $pdo->prepare("INSERT INTO payment_auto_verify_logs (ref_num, amount, source_card, request_data, status, created_at, selected_order_id, user_id, expected_amount, amount_matched, purchase_approved, topup_created, credited_amount, audit_note) VALUES (?, ?, ?, ?, 'amount_mismatch', ?, ?, ?, ?, 0, 0, 1, ?, ?)");
             $stmt_log->execute([$ref_num, $amount, $source_card_last_four, $raw_input, (string)$timestamp, $order_id, $user_id, $expected_amount, $amount, $audit_note]);
 

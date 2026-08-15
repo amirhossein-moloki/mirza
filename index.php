@@ -1999,17 +1999,29 @@ if ($text == $datatextbot['text_sell'] || $datain == "buy" || $text == "/buy") {
         }
 
         $username_ac = $user['Processing_value_tow'];
-        $random_invoice_id = bin2hex(random_bytes(4));
-        $date_now = time();
-        $status_unpaid = "unpaid";
 
-        $stmt_inv = $pdo->prepare("INSERT IGNORE INTO invoice (id_user, id_invoice, username, time_sell, Service_location, name_product, price_product, Volume, Service_time, Status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        $stmt_inv->execute([$from_id, $random_invoice_id, $username_ac, $date_now, $marzban_list_get['name_panel'], $info_product['name_product'], $priceproduct, $info_product['Volume_constraint'], $info_product['Service_time'], $status_unpaid]);
+        $active_inv = getActiveInvoiceForOrder($pdo, null, $username_ac, $from_id);
+        if (!$active_inv) {
+            $order_id_gen = "ord_" . bin2hex(random_bytes(4));
+            $active_inv = createInvoiceVersion($pdo, $from_id, $order_id_gen, $username_ac, $marzban_list_get['name_panel'], $info_product['name_product'], $priceproduct, $info_product['Volume_constraint'], $info_product['Service_time'], 'active');
+        } else {
+            if (empty($active_inv['id_order'])) {
+                $order_id_gen = "ord_" . bin2hex(random_bytes(4));
+                $stmt_up = $pdo->prepare("UPDATE invoice SET id_order = ? WHERE id_invoice = ?");
+                $stmt_up->execute([$order_id_gen, $active_inv['id_invoice']]);
+                $active_inv['id_order'] = $order_id_gen;
+            }
+        }
 
+        $priceproduct = $active_inv['price_product'];
+        $active_invoice_id = $active_inv['id_invoice'];
         $payment_report_invoice = "getconfigafterpay|" . $username_ac;
         $amount = intval($priceproduct);
+        $order_id = $active_inv['id_order'];
     } else {
         $amount = intval($user['Processing_value']);
+        $active_invoice_id = null;
+        $order_id = bin2hex(random_bytes(5));
     }
 
     if ($amount <= 0) {
@@ -2024,13 +2036,12 @@ if ($text == $datatextbot['text_sell'] || $datain == "buy" || $text == "/buy") {
     }
 
     // Create payment
-    $order_id = bin2hex(random_bytes(5));
     $dateacc = date('Y/m/d H:i:s');
     $payment_Status = "unpaid";
     $Payment_Method = "auto_card_to_card";
 
-    $stmt = $pdo->prepare("INSERT INTO Payment_report (id_user, id_order, time, price, payment_Status, Payment_Method, invoice, card_last_four) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-    $stmt->execute([$from_id, $order_id, $dateacc, $amount, $payment_Status, $Payment_Method, $payment_report_invoice, $card['card_last_four']]);
+    $stmt = $pdo->prepare("INSERT INTO Payment_report (id_user, id_order, time, price, payment_Status, Payment_Method, invoice, card_last_four, id_invoice) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    $stmt->execute([$from_id, $order_id, $dateacc, $amount, $payment_Status, $Payment_Method, $payment_report_invoice, $card['card_last_four'], $active_invoice_id]);
 
     // Display payment information
     $formatted_amount = number_format($amount);
@@ -2271,6 +2282,33 @@ if ($text == $datatextbot['text_sell'] || $datain == "buy" || $text == "/buy") {
     $info_product['price_product'] = round($info_product['price_product']);
     if ($info_product['price_product'] < 0)
         $info_product['price_product'] = 0;
+
+    $username_ac = $user['Processing_value_tow'];
+    $existing_inv = getActiveInvoiceForOrder($pdo, null, $username_ac, $from_id);
+    $order_id = $existing_inv ? $existing_inv['id_order'] : ("ord_" . bin2hex(random_bytes(4)));
+    if (empty($order_id)) {
+        $order_id = "ord_" . bin2hex(random_bytes(4));
+        if ($existing_inv) {
+            $stmt_up = $pdo->prepare("UPDATE invoice SET id_order = ? WHERE id_invoice = ?");
+            $stmt_up->execute([$order_id, $existing_inv['id_invoice']]);
+        }
+    }
+
+    $new_inv = createInvoiceVersion(
+        $pdo,
+        $from_id,
+        $order_id,
+        $username_ac,
+        $user['Processing_value'],
+        $info_product['name_product'],
+        $info_product['price_product'],
+        $info_product['Volume_constraint'],
+        $info_product['Service_time'],
+        'active',
+        $result,
+        $text
+    );
+
     $textin = sprintf($textbotlang['users']['buy']['invoicebuy'], $user['Processing_value_tow'], $info_product['name_product'], $info_product['Service_time'], $info_product['price_product'], $info_product['Volume_constraint'], $user['Balance']);
     $paymentDiscount = json_encode([
         'inline_keyboard' => [

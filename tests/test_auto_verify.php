@@ -1,6 +1,6 @@
 <?php
 /**
- * Test suite for Auto Verify Payment Processing
+ * Test suite for Auto Verify Payment Processing and Invoice Versioning
  */
 
 ini_set('error_log', '/dev/null');
@@ -59,6 +59,7 @@ class AutoVerifyTest
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             id_user VARCHAR(200),
             id_order VARCHAR(500),
+            id_invoice VARCHAR(200) NULL,
             time VARCHAR(200),
             price VARCHAR(400),
             dec_not_confirmed TEXT,
@@ -98,6 +99,10 @@ class AutoVerifyTest
 
         $this->pdo->exec("CREATE TABLE IF NOT EXISTS invoice (
             id_invoice VARCHAR(200) PRIMARY KEY,
+            id_order VARCHAR(500) NULL,
+            version INT DEFAULT 1,
+            discount_amount VARCHAR(200) DEFAULT '0',
+            discount_code VARCHAR(1000) NULL,
             id_user VARCHAR(200) NULL,
             username VARCHAR(200) NULL,
             Service_location VARCHAR(200) NULL,
@@ -130,14 +135,145 @@ class AutoVerifyTest
         echo "✅ PASS: $message\n";
     }
 
+    public function testInvoiceVersioning(): void
+    {
+        echo "\n--- Running testInvoiceVersioning ---\n";
+        $this->resetData();
+
+        // 1. Initial purchase creates Invoice Version 1
+        $inv1 = createInvoiceVersion(
+            $this->pdo,
+            'user1',
+            'order500',
+            'user_ac_1',
+            'panel1',
+            'Service A',
+            100,
+            10,
+            30,
+            'active'
+        );
+
+        $this->assert($inv1['version'] === 1, "Invoice Version 1 generated with version = 1");
+        $this->assert($inv1['Status'] === 'active', "Invoice Version 1 status is active");
+        $this->assert((int)$inv1['price_product'] === 100, "Invoice Version 1 price is 100");
+
+        // 2. Apply discount creating Invoice Version 2
+        $inv2 = createInvoiceVersion(
+            $this->pdo,
+            'user1',
+            'order500',
+            'user_ac_1',
+            'panel1',
+            'Service A',
+            80,
+            10,
+            30,
+            'active',
+            20,
+            'DISCOUNT20'
+        );
+
+        $this->assert($inv2['version'] === 2, "Invoice Version 2 generated with version = 2");
+        $this->assert($inv2['Status'] === 'active', "Invoice Version 2 status is active");
+        $this->assert((int)$inv2['price_product'] === 80, "Invoice Version 2 price is 80");
+        $this->assert((int)$inv2['discount_amount'] === 20, "Invoice Version 2 discount amount is 20");
+
+        // 3. Verify Version 1 is now superseded
+        $stmt = $this->pdo->prepare("SELECT Status FROM invoice WHERE id_invoice = ?");
+        $stmt->execute([$inv1['id_invoice']]);
+        $status_v1 = $stmt->fetchColumn();
+        $this->assert($status_v1 === 'superseded', "Invoice Version 1 status updated to superseded");
+
+        // 4. Verify Version 1 row remains unchanged in DB
+        $stmt = $this->pdo->prepare("SELECT price_product FROM invoice WHERE id_invoice = ?");
+        $stmt->execute([$inv1['id_invoice']]);
+        $price_v1 = (int)$stmt->fetchColumn();
+        $this->assert($price_v1 === 100, "Invoice Version 1 amount preserved as 100 in database");
+
+        // 5. Verify active invoice for order500 returns Version 2
+        $active_inv = getActiveInvoiceForOrder($this->pdo, 'order500');
+        $this->assert($active_inv['id_invoice'] === $inv2['id_invoice'], "getActiveInvoiceForOrder returns Version 2");
+    }
+
+    public function testPaymentWithDiscount(): void
+    {
+        echo "\n--- Running testPaymentWithDiscount ---\n";
+        $this->resetData();
+
+        $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('user1', 0)");
+
+        // Original Invoice 100
+        $inv1 = createInvoiceVersion($this->pdo, 'user1', 'order501', 'user_ac_1', 'panel1', 'Service B', 100, 10, 30, 'active');
+
+        // Discount applied -> Version 2 (80)
+        $inv2 = createInvoiceVersion($this->pdo, 'user1', 'order501', 'user_ac_1', 'panel1', 'Service B', 80, 10, 30, 'active', 20, 'DIS20');
+
+        // Payment record created pointing to active Version 2
+        $this->pdo->exec("INSERT INTO Payment_report (id_user, id_order, id_invoice, price, Payment_Method, payment_Status, card_last_four)
+                          VALUES ('user1', 'order501', '{$inv2['id_invoice']}', '80', 'auto_card_to_card', 'unpaid', '4444')");
+
+        $payload = [
+            'api_token' => 'TEST_API_TOKEN',
+            'amount' => 80,
+            'source_card_last_four' => '4444',
+            'ref_num' => 'REF_DISCOUNT_PAY_1',
+            'timestamp' => time()
+        ];
+
+        $res = processAutoVerifyPayment($this->pdo, $payload);
+        $this->assert($res['http_code'] === 200, "HTTP code 200 for discounted payment");
+
+        // Verify Payment_report updated to paid
+        $stmt = $this->pdo->query("SELECT payment_Status FROM Payment_report WHERE id_order = 'order501'");
+        $this->assert($stmt->fetchColumn() === 'paid', "Payment_report status updated to paid");
+
+        // Verify Invoice Version 2 status updated to paid
+        $stmt = $this->pdo->prepare("SELECT Status FROM invoice WHERE id_invoice = ?");
+        $stmt->execute([$inv2['id_invoice']]);
+        $this->assert($stmt->fetchColumn() === 'paid', "Invoice Version 2 status updated to paid");
+
+        // Verify Version 1 remains superseded
+        $stmt = $this->pdo->prepare("SELECT Status FROM invoice WHERE id_invoice = ?");
+        $stmt->execute([$inv1['id_invoice']]);
+        $this->assert($stmt->fetchColumn() === 'superseded', "Invoice Version 1 remains superseded");
+    }
+
+    public function testPaymentBeforeDiscount(): void
+    {
+        echo "\n--- Running testPaymentBeforeDiscount ---\n";
+        $this->resetData();
+
+        $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('user1', 0)");
+
+        // Original Invoice Version 1 (100)
+        $inv1 = createInvoiceVersion($this->pdo, 'user1', 'order502', 'user_ac_1', 'panel1', 'Service C', 100, 10, 30, 'active');
+
+        // Payment made on Version 1
+        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, id_invoice, price, Payment_Method, payment_Status, card_last_four)
+                          VALUES (10, 'user1', 'order502', '{$inv1['id_invoice']}', '100', 'auto_card_to_card', 'unpaid', '1111')");
+
+        // Later discount applied -> Version 2 (80)
+        $inv2 = createInvoiceVersion($this->pdo, 'user1', 'order502', 'user_ac_1', 'panel1', 'Service C', 80, 10, 30, 'active', 20, 'DISC20');
+
+        // Verify old payment remains attached to Invoice Version 1
+        $stmt = $this->pdo->query("SELECT id_invoice, price FROM Payment_report WHERE id = 10");
+        $pay_row = $stmt->fetch();
+
+        $this->assert($pay_row['id_invoice'] === $inv1['id_invoice'], "Old payment remains attached to Version 1 ID");
+        $this->assert((int)$pay_row['price'] === 100, "Old payment amount remains 100");
+    }
+
     public function testExactMatch(): void
     {
         echo "\n--- Running testExactMatch ---\n";
         $this->resetData();
 
         $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('user1', 0)");
-        $this->pdo->exec("INSERT INTO Payment_report (id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four)
-                          VALUES ('user1', 'ord101', '100', 'auto_card_to_card', 'unpaid', '0|0', '1234')");
+        $inv = createInvoiceVersion($this->pdo, 'user1', 'ord101', 'user1_ac', 'panel1', 'Service A', 100, 10, 30, 'active');
+
+        $this->pdo->exec("INSERT INTO Payment_report (id_user, id_order, id_invoice, price, Payment_Method, payment_Status, invoice, card_last_four)
+                          VALUES ('user1', 'ord101', '{$inv['id_invoice']}', '100', 'auto_card_to_card', 'unpaid', '0|0', '1234')");
 
         $payload = [
             'api_token' => 'TEST_API_TOKEN',
@@ -171,8 +307,10 @@ class AutoVerifyTest
         $this->resetData();
 
         $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('user1', 0)");
-        $this->pdo->exec("INSERT INTO Payment_report (id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four)
-                          VALUES ('user1', 'ord102', '100', 'auto_card_to_card', 'unpaid', '0|0', '1234')");
+        $inv = createInvoiceVersion($this->pdo, 'user1', 'ord102', 'user1_ac', 'panel1', 'Service A', 100, 10, 30, 'active');
+
+        $this->pdo->exec("INSERT INTO Payment_report (id_user, id_order, id_invoice, price, Payment_Method, payment_Status, invoice, card_last_four)
+                          VALUES ('user1', 'ord102', '{$inv['id_invoice']}', '100', 'auto_card_to_card', 'unpaid', '0|0', '1234')");
 
         $payload = [
             'api_token' => 'TEST_API_TOKEN',
@@ -210,8 +348,10 @@ class AutoVerifyTest
         $this->resetData();
 
         $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('user1', 10)");
-        $this->pdo->exec("INSERT INTO Payment_report (id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four)
-                          VALUES ('user1', 'ord103', '100', 'auto_card_to_card', 'unpaid', '0|0', '1234')");
+        $inv = createInvoiceVersion($this->pdo, 'user1', 'ord103', 'user1_ac', 'panel1', 'Service A', 100, 10, 30, 'active');
+
+        $this->pdo->exec("INSERT INTO Payment_report (id_user, id_order, id_invoice, price, Payment_Method, payment_Status, invoice, card_last_four)
+                          VALUES ('user1', 'ord103', '{$inv['id_invoice']}', '100', 'auto_card_to_card', 'unpaid', '0|0', '1234')");
 
         $payload = [
             'api_token' => 'TEST_API_TOKEN',
@@ -242,43 +382,42 @@ class AutoVerifyTest
         $this->assert((int)$log['credited_amount'] === 120, "Log credited_amount is 120");
     }
 
-    public function testSameCardTwoAccounts(): void
+    public function testSameCardTwoAccountsDifferentAmounts(): void
     {
-        echo "\n--- Running testSameCardTwoAccounts ---\n";
+        echo "\n--- Running testSameCardTwoAccountsDifferentAmounts ---\n";
         $this->resetData();
 
         $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('userA', 0)");
         $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('userB', 0)");
 
-        // User A created first
-        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four)
-                          VALUES (101, 'userA', 'ord101', '100', 'auto_card_to_card', 'unpaid', '0|0', '1234')");
+        // Account A: Active Invoice 100
+        $invA = createInvoiceVersion($this->pdo, 'userA', 'ordA', 'userA_ac', 'panel1', 'Service A', 100, 10, 30, 'active');
+        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, id_invoice, price, Payment_Method, payment_Status, card_last_four)
+                          VALUES (101, 'userA', 'ordA', '{$invA['id_invoice']}', '100', 'auto_card_to_card', 'unpaid', '8888')");
 
-        // User B created second
-        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four)
-                          VALUES (102, 'userB', 'ord102', '100', 'auto_card_to_card', 'unpaid', '0|0', '1234')");
+        // Account B: Active Invoice 80
+        $invB = createInvoiceVersion($this->pdo, 'userB', 'ordB', 'userB_ac', 'panel1', 'Service B', 80, 10, 30, 'active');
+        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, id_invoice, price, Payment_Method, payment_Status, card_last_four)
+                          VALUES (102, 'userB', 'ordB', '{$invB['id_invoice']}', '80', 'auto_card_to_card', 'unpaid', '8888')");
 
         $payload = [
             'api_token' => 'TEST_API_TOKEN',
-            'amount' => 100,
-            'source_card_last_four' => '1234',
-            'ref_num' => 'REF_MULTI_1',
+            'amount' => 80,
+            'source_card_last_four' => '8888',
+            'ref_num' => 'REF_DIFF_AMT_1',
             'timestamp' => time()
         ];
 
         $res = processAutoVerifyPayment($this->pdo, $payload);
-
         $this->assert($res['http_code'] === 200, "HTTP code 200");
 
-        // Earliest request (ord101 / userA) must be assigned
-        $stmt = $this->pdo->query("SELECT payment_Status FROM Payment_report WHERE id_order = 'ord101'");
-        $statusA = $stmt->fetchColumn();
-        $this->assert($statusA === 'paid', "User A request (ord101) is paid");
+        // Account B matched because active invoice amount is 80
+        $statusB = $this->pdo->query("SELECT payment_Status FROM Payment_report WHERE id_order = 'ordB'")->fetchColumn();
+        $this->assert($statusB === 'paid', "Account B (ordB) status updated to paid");
 
-        // User B request (ord102) must remain unpaid
-        $stmt = $this->pdo->query("SELECT payment_Status FROM Payment_report WHERE id_order = 'ord102'");
-        $statusB = $stmt->fetchColumn();
-        $this->assert($statusB === 'unpaid', "User B request (ord102) remains unpaid");
+        // Account A remains unpaid
+        $statusA = $this->pdo->query("SELECT payment_Status FROM Payment_report WHERE id_order = 'ordA'")->fetchColumn();
+        $this->assert($statusA === 'unpaid', "Account A (ordA) status remains unpaid");
     }
 
     public function testSameCardMultipleAccounts(): void
@@ -290,12 +429,16 @@ class AutoVerifyTest
         $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('userB', 0)");
         $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('userC', 0)");
 
-        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four)
-                          VALUES (10, 'userA', 'ordA', '100', 'auto_card_to_card', 'unpaid', '0|0', '9999')");
-        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four)
-                          VALUES (11, 'userB', 'ordB', '100', 'auto_card_to_card', 'unpaid', '0|0', '9999')");
-        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four)
-                          VALUES (12, 'userC', 'ordC', '100', 'auto_card_to_card', 'unpaid', '0|0', '9999')");
+        $invA = createInvoiceVersion($this->pdo, 'userA', 'ordA', 'userA_ac', 'panel1', 'Service A', 100, 10, 30, 'active');
+        $invB = createInvoiceVersion($this->pdo, 'userB', 'ordB', 'userB_ac', 'panel1', 'Service B', 100, 10, 30, 'active');
+        $invC = createInvoiceVersion($this->pdo, 'userC', 'ordC', 'userC_ac', 'panel1', 'Service C', 100, 10, 30, 'active');
+
+        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, id_invoice, price, Payment_Method, payment_Status, card_last_four)
+                          VALUES (10, 'userA', 'ordA', '{$invA['id_invoice']}', '100', 'auto_card_to_card', 'unpaid', '9999')");
+        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, id_invoice, price, Payment_Method, payment_Status, card_last_four)
+                          VALUES (11, 'userB', 'ordB', '{$invB['id_invoice']}', '100', 'auto_card_to_card', 'unpaid', '9999')");
+        $this->pdo->exec("INSERT INTO Payment_report (id, id_user, id_order, id_invoice, price, Payment_Method, payment_Status, card_last_four)
+                          VALUES (12, 'userC', 'ordC', '{$invC['id_invoice']}', '100', 'auto_card_to_card', 'unpaid', '9999')");
 
         $payload = [
             'api_token' => 'TEST_API_TOKEN',
@@ -308,7 +451,7 @@ class AutoVerifyTest
         $res = processAutoVerifyPayment($this->pdo, $payload);
         $this->assert($res['http_code'] === 200, "HTTP code 200");
 
-        // ordA assigned
+        // ordA assigned as earliest
         $this->assert($this->pdo->query("SELECT payment_Status FROM Payment_report WHERE id_order = 'ordA'")->fetchColumn() === 'paid', "ordA paid");
         $this->assert($this->pdo->query("SELECT payment_Status FROM Payment_report WHERE id_order = 'ordB'")->fetchColumn() === 'unpaid', "ordB remains unpaid");
         $this->assert($this->pdo->query("SELECT payment_Status FROM Payment_report WHERE id_order = 'ordC'")->fetchColumn() === 'unpaid', "ordC remains unpaid");
@@ -320,8 +463,10 @@ class AutoVerifyTest
         $this->resetData();
 
         $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('user1', 0)");
-        $this->pdo->exec("INSERT INTO Payment_report (id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four)
-                          VALUES ('user1', 'ordDUP', '100', 'auto_card_to_card', 'unpaid', '0|0', '1234')");
+        $inv = createInvoiceVersion($this->pdo, 'user1', 'ordDUP', 'user1_ac', 'panel1', 'Service A', 100, 10, 30, 'active');
+
+        $this->pdo->exec("INSERT INTO Payment_report (id_user, id_order, id_invoice, price, Payment_Method, payment_Status, card_last_four)
+                          VALUES ('user1', 'ordDUP', '{$inv['id_invoice']}', '100', 'auto_card_to_card', 'unpaid', '1234')");
 
         $payload = [
             'api_token' => 'TEST_API_TOKEN',
@@ -353,12 +498,15 @@ class AutoVerifyTest
         $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('user1', 0)");
         $this->pdo->exec("INSERT INTO user (id, Balance) VALUES ('user2', 0)");
 
+        $inv1 = createInvoiceVersion($this->pdo, 'user1', 'P1', 'user1_ac', 'panel1', 'Service A', 500, 10, 30, 'active');
+        $inv2 = createInvoiceVersion($this->pdo, 'user2', 'P2', 'user2_ac', 'panel1', 'Service B', 500, 10, 30, 'active');
+
         // Insert with auto increment IDs preserving persisted insertion order
-        $stmt1 = $this->pdo->prepare("INSERT INTO Payment_report (id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four) VALUES ('user1', 'P1', '500', 'auto_card_to_card', 'unpaid', '0|0', '7777')");
+        $stmt1 = $this->pdo->prepare("INSERT INTO Payment_report (id_user, id_order, id_invoice, price, Payment_Method, payment_Status, card_last_four) VALUES ('user1', 'P1', '{$inv1['id_invoice']}', '500', 'auto_card_to_card', 'unpaid', '7777')");
         $stmt1->execute();
         $id1 = $this->pdo->lastInsertId();
 
-        $stmt2 = $this->pdo->prepare("INSERT INTO Payment_report (id_user, id_order, price, Payment_Method, payment_Status, invoice, card_last_four) VALUES ('user2', 'P2', '500', 'auto_card_to_card', 'unpaid', '0|0', '7777')");
+        $stmt2 = $this->pdo->prepare("INSERT INTO Payment_report (id_user, id_order, id_invoice, price, Payment_Method, payment_Status, card_last_four) VALUES ('user2', 'P2', '{$inv2['id_invoice']}', '500', 'auto_card_to_card', 'unpaid', '7777')");
         $stmt2->execute();
         $id2 = $this->pdo->lastInsertId();
 
@@ -405,10 +553,13 @@ class AutoVerifyTest
 
     public function runAll(): void
     {
+        $this->testInvoiceVersioning();
+        $this->testPaymentWithDiscount();
+        $this->testPaymentBeforeDiscount();
+        $this->testSameCardTwoAccountsDifferentAmounts();
         $this->testExactMatch();
         $this->testLowerAmount();
         $this->testHigherAmount();
-        $this->testSameCardTwoAccounts();
         $this->testSameCardMultipleAccounts();
         $this->testDuplicateCallback();
         $this->testConcurrentPurchaseCreationOrder();

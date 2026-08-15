@@ -347,6 +347,10 @@ try {
     if (!$table_exists) {
         $result = $connect->query("CREATE TABLE invoice (
         id_invoice varchar(200) PRIMARY KEY,
+        id_order varchar(500) NULL,
+        version int(11) DEFAULT 1,
+        discount_amount varchar(200) DEFAULT '0',
+        discount_code varchar(1000) NULL,
         id_user varchar(200) NULL,
         username varchar(200) NULL,
         Service_location varchar(200) NULL,
@@ -376,6 +380,10 @@ try {
            $result = $connect->query("ALTER TABLE invoice ADD Status VARCHAR(2000)");
         }    
     }
+    addFieldToTable('invoice', 'id_order', '', 'VARCHAR(500)');
+    addFieldToTable('invoice', 'version', '1', 'INT(11)');
+    addFieldToTable('invoice', 'discount_amount', '0', 'VARCHAR(200)');
+    addFieldToTable('invoice', 'discount_code', '', 'VARCHAR(1000)');
 } catch (Exception $e) {
     file_put_contents("$randomString.txt",$e->getMessage());
 }
@@ -678,6 +686,7 @@ try {
 try {
     addFieldToTable('Payment_report', 'card_last_four', '', 'VARCHAR(10)');
     addFieldToTable('Payment_report', 'receipt_file_id', '', 'VARCHAR(1000)');
+    addFieldToTable('Payment_report', 'id_invoice', '', 'VARCHAR(200)');
 } catch (Exception $e) {
     file_put_contents('error_log', $e->getMessage());
 }
