@@ -631,6 +631,27 @@ try {
     file_put_contents('error_log', $e->getMessage());
 }
 
+// Ensure payment_auto_verify_logs audit fields exist
+try {
+    addFieldToTable('payment_auto_verify_logs', 'selected_order_id', '', 'VARCHAR(100)');
+    addFieldToTable('payment_auto_verify_logs', 'user_id', '', 'VARCHAR(100)');
+    addFieldToTable('payment_auto_verify_logs', 'expected_amount', '0', 'INT(11)');
+    addFieldToTable('payment_auto_verify_logs', 'amount_matched', '0', 'INT(1)');
+    addFieldToTable('payment_auto_verify_logs', 'purchase_approved', '0', 'INT(1)');
+    addFieldToTable('payment_auto_verify_logs', 'topup_created', '0', 'INT(1)');
+    addFieldToTable('payment_auto_verify_logs', 'credited_amount', '0', 'INT(11)');
+    addFieldToTable('payment_auto_verify_logs', 'audit_note', '', 'TEXT');
+
+    if (isset($connect)) {
+        $result_idx = $connect->query("SHOW INDEX FROM payment_auto_verify_logs WHERE Key_name = 'unique_ref_num'");
+        if ($result_idx && $result_idx->num_rows == 0) {
+            $connect->query("ALTER TABLE payment_auto_verify_logs ADD UNIQUE KEY unique_ref_num (ref_num)");
+        }
+    }
+} catch (Exception $e) {
+    file_put_contents('error_log', $e->getMessage());
+}
+
 //----------------------- [ payment_auto_verify_logs ] --------------------- //
 try {
     $result = $connect->query("SHOW TABLES LIKE 'payment_auto_verify_logs'");

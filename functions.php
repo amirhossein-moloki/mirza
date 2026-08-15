@@ -565,3 +565,114 @@ function isBase64($string)
     }
     return false;
 }
+
+function processAutoVerifyPayment($pdo, $data)
+{
+    global $api_token;
+
+    // Verify API Token
+    if (!isset($data['api_token']) || $data['api_token'] !== $api_token) {
+        return ['http_code' => 401, 'response' => ['status' => 'error', 'message' => 'Unauthorized']];
+    }
+
+    $bank_name = $data['bank_name'] ?? '';
+    $amount = intval($data['amount'] ?? 0);
+    $source_card_last_four = trim($data['source_card_last_four'] ?? '');
+    $ref_num = trim($data['ref_num'] ?? '');
+    $sms_raw = $data['sms_raw'] ?? '';
+    $timestamp = $data['timestamp'] ?? time();
+    $raw_input = is_string($data) ? $data : json_encode($data);
+
+    if (empty($ref_num) || $amount <= 0) {
+        return ['http_code' => 400, 'response' => ['status' => 'error', 'message' => 'Invalid payment payload']];
+    }
+
+    $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+    $forUpdate = ($driver === 'mysql') ? ' FOR UPDATE' : '';
+
+    try {
+        $pdo->beginTransaction();
+
+        // 1. Idempotency check: Check if ref_num already exists
+        $stmt_check = $pdo->prepare("SELECT * FROM payment_auto_verify_logs WHERE ref_num = ?" . $forUpdate);
+        $stmt_check->execute([$ref_num]);
+        $existing_log = $stmt_check->fetch(PDO::FETCH_ASSOC);
+
+        if ($existing_log) {
+            $pdo->rollBack();
+            return ['http_code' => 400, 'response' => ['status' => 'error', 'message' => 'Duplicate transaction']];
+        }
+
+        // 2. Select earliest valid unpaid pending purchase request for destination card
+        $stmt_payment = $pdo->prepare("SELECT * FROM Payment_report WHERE Payment_Method = 'auto_card_to_card' AND payment_Status = 'unpaid' AND card_last_four = ? ORDER BY id ASC LIMIT 1" . $forUpdate);
+        $stmt_payment->execute([$source_card_last_four]);
+        $payment = $stmt_payment->fetch(PDO::FETCH_ASSOC);
+
+        if (!$payment) {
+            // Unmatched / Ambiguous payment
+            $audit_note = "Payment unmatched: No unpaid pending purchase request found for card $source_card_last_four. Payment preserved and not assigned to any account.";
+            $stmt_log = $pdo->prepare("INSERT INTO payment_auto_verify_logs (ref_num, amount, source_card, request_data, status, created_at, audit_note) VALUES (?, ?, ?, ?, 'unmatched', ?, ?)");
+            $stmt_log->execute([$ref_num, $amount, $source_card_last_four, $raw_input, (string)$timestamp, $audit_note]);
+            $pdo->commit();
+
+            return ['http_code' => 404, 'response' => ['status' => 'error', 'message' => 'No matching unpaid payment found']];
+        }
+
+        $expected_amount = intval($payment['price']);
+        $user_id = $payment['id_user'];
+        $order_id = $payment['id_order'];
+
+        if ($amount === $expected_amount) {
+            // Exact Amount Match
+            $stmt_update = $pdo->prepare("UPDATE Payment_report SET payment_Status = 'paid' WHERE id_order = ?");
+            $stmt_update->execute([$order_id]);
+
+            // Approve purchase
+            DirectPayment($order_id);
+
+            // Audit Trail
+            $audit_note = "Assigned payment $ref_num to Purchase #$order_id (User $user_id) based on earliest pending request rule for card $source_card_last_four. Exact amount match ($amount). Real payer identity not verified.";
+            $stmt_log = $pdo->prepare("INSERT INTO payment_auto_verify_logs (ref_num, amount, source_card, request_data, status, created_at, selected_order_id, user_id, expected_amount, amount_matched, purchase_approved, topup_created, credited_amount, audit_note) VALUES (?, ?, ?, ?, 'success', ?, ?, ?, ?, 1, 1, 0, 0, ?)");
+            $stmt_log->execute([$ref_num, $amount, $source_card_last_four, $raw_input, (string)$timestamp, $order_id, $user_id, $expected_amount, $audit_note]);
+
+            $pdo->commit();
+
+            return ['http_code' => 200, 'response' => ['status' => 'success', 'message' => 'Payment verified and purchase approved successfully']];
+        } else {
+            // Amount Mismatch
+            $stmt_update = $pdo->prepare("UPDATE Payment_report SET payment_Status = 'amount_mismatch' WHERE id_order = ?");
+            $stmt_update->execute([$order_id]);
+
+            // Credit FULL actual payment amount to user's balance
+            $stmt_user = $pdo->prepare("SELECT Balance FROM user WHERE id = ?" . $forUpdate);
+            $stmt_user->execute([$user_id]);
+            $current_balance = intval($stmt_user->fetchColumn());
+            $new_balance = $current_balance + $amount;
+
+            $stmt_bal = $pdo->prepare("UPDATE user SET Balance = ? WHERE id = ?");
+            $stmt_bal->execute([$new_balance, $user_id]);
+
+            // Confirm Automatic Top-Up
+            $formatted_amount = number_format($amount);
+            $msg = "⚡ مبلغ " . $formatted_amount . " تومان به حساب شما واریز شد (شارژ خودکار حساب).";
+            sendmessage($user_id, $msg, null, 'HTML');
+
+            // Audit Trail
+            $audit_note = "Assigned payment $ref_num to Purchase #$order_id (User $user_id) based on earliest pending request rule for card $source_card_last_four. Amount mismatch: expected $expected_amount, received $amount. Purchase not approved; full actual amount ($amount) credited to user balance. Real payer identity not verified.";
+            $stmt_log = $pdo->prepare("INSERT INTO payment_auto_verify_logs (ref_num, amount, source_card, request_data, status, created_at, selected_order_id, user_id, expected_amount, amount_matched, purchase_approved, topup_created, credited_amount, audit_note) VALUES (?, ?, ?, ?, 'amount_mismatch', ?, ?, ?, ?, 0, 0, 1, ?, ?)");
+            $stmt_log->execute([$ref_num, $amount, $source_card_last_four, $raw_input, (string)$timestamp, $order_id, $user_id, $expected_amount, $amount, $audit_note]);
+
+            $pdo->commit();
+
+            return ['http_code' => 200, 'response' => ['status' => 'success', 'message' => 'Payment processed with amount mismatch; full payment amount credited to balance']];
+        }
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        if (strpos($e->getMessage(), '1062') !== false || strpos($e->getMessage(), 'UNIQUE') !== false || strpos($e->getMessage(), 'Integrity constraint violation') !== false) {
+            return ['http_code' => 400, 'response' => ['status' => 'error', 'message' => 'Duplicate transaction']];
+        }
+        throw $e;
+    }
+}
