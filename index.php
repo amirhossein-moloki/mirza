@@ -1933,6 +1933,11 @@ if ($text == $datatextbot['text_sell'] || $datain == "buy" || $text == "/buy") {
     }
     step('home', $from_id);
 } elseif ($datain == "pay_auto_verify") {
+    $status_auto_verify = select("PaySetting", "ValuePay", "NamePay", "status_auto_verify", "select")['ValuePay'] ?? 'onauto_verify';
+    if ($status_auto_verify !== 'onauto_verify') {
+        sendmessage($from_id, "❌ این روش پرداخت در حال حاضر توسط مدیریت غیرفعال شده است.", null, 'HTML');
+        return;
+    }
     $stmt = $pdo->prepare("SELECT * FROM user_bank_cards WHERE user_id = ? AND status = 'active'");
     $stmt->execute([$from_id]);
     $cards = $stmt->fetchAll();
