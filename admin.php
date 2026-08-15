@@ -1200,6 +1200,7 @@ if ($text == $textbotlang['Admin']['keyboardadmin']['finance']) {
     $sqlstatus_nowpayment = select("PaySetting", "ValuePay", "NamePay", "nowpaymentstatus", "select")['ValuePay'];
     $sqlstatus_iranpay = select("PaySetting", "ValuePay", "NamePay", "digistatus", "select")['ValuePay'];
     $sqlstatus_aqayepardakht = select("PaySetting", "ValuePay", "NamePay", "statusaqayepardakht", "select")['ValuePay'];
+    $sqlstatus_auto_verify = select("PaySetting", "ValuePay", "NamePay", "status_auto_verify", "select")['ValuePay'] ?? 'onauto_verify';
     $status_cart = [
         'oncard' => $textbotlang['Admin']['turnon'],
         'offcard' => $textbotlang['Admin']['turnoff'],
@@ -1216,12 +1217,20 @@ if ($text == $textbotlang['Admin']['keyboardadmin']['finance']) {
         'onaqayepardakht' => $textbotlang['Admin']['turnon'],
         'offaqayepardakht' => $textbotlang['Admin']['turnoff'],
     ][$sqlstatus_aqayepardakht];
+    $status_auto_verify = [
+        'onauto_verify' => $textbotlang['Admin']['turnon'],
+        'offauto_verify' => $textbotlang['Admin']['turnoff'],
+    ][$sqlstatus_auto_verify];
     $keyboardmoeny = json_encode([
         'inline_keyboard' => [
             [
                 ['text' => $textbotlang['users']['moeny']['setting'], 'callback_data' => "settingcart"],
                 ['text' => $status_cart, 'callback_data' => "editpay-cart-" . $sqlstatus_cart],
                 ['text' => $textbotlang['users']['moeny']['cart_to_Cart_btn'], 'callback_data' => "none"],
+            ],
+            [
+                ['text' => $status_auto_verify, 'callback_data' => "editpay-auto_verify-" . $sqlstatus_auto_verify],
+                ['text' => "تایید خودکار کارت به کارت", 'callback_data' => "none"],
             ],
             [
                 ['text' => $textbotlang['users']['moeny']['setting'], 'callback_data' => "SettingnowPayment"],
@@ -1271,8 +1280,16 @@ if ($text == $textbotlang['Admin']['keyboardadmin']['finance']) {
             $value = "onaqayepardakht";
         }
         update("PaySetting", "ValuePay", $value, "NamePay", "statusaqayepardakht");
+    } elseif ($methodpay == "auto_verify") {
+        if ($status == "onauto_verify") {
+            $value = "offauto_verify";
+        } else {
+            $value = "onauto_verify";
+        }
+        update("PaySetting", "ValuePay", $value, "NamePay", "status_auto_verify");
     }
     $sqlstatus_cart = select("PaySetting", "ValuePay", "NamePay", "Cartstatus", "select")['ValuePay'];
+    $sqlstatus_auto_verify = select("PaySetting", "ValuePay", "NamePay", "status_auto_verify", "select")['ValuePay'] ?? 'onauto_verify';
     $sqlstatus_nowpayment = select("PaySetting", "ValuePay", "NamePay", "nowpaymentstatus", "select")['ValuePay'];
     $sqlstatus_iranpay = select("PaySetting", "ValuePay", "NamePay", "digistatus", "select")['ValuePay'];
     $sqlstatus_aqayepardakht = select("PaySetting", "ValuePay", "NamePay", "statusaqayepardakht", "select")['ValuePay'];
@@ -1292,12 +1309,20 @@ if ($text == $textbotlang['Admin']['keyboardadmin']['finance']) {
         'onaqayepardakht' => $textbotlang['Admin']['turnon'],
         'offaqayepardakht' => $textbotlang['Admin']['turnoff'],
     ][$sqlstatus_aqayepardakht];
+    $status_auto_verify = [
+        'onauto_verify' => $textbotlang['Admin']['turnon'],
+        'offauto_verify' => $textbotlang['Admin']['turnoff'],
+    ][$sqlstatus_auto_verify];
     $keyboardmoeny = json_encode([
         'inline_keyboard' => [
             [
                 ['text' => $textbotlang['users']['moeny']['setting'], 'callback_data' => "settingcart"],
                 ['text' => $status_cart, 'callback_data' => "editpay-cart-" . $sqlstatus_cart],
                 ['text' => $textbotlang['users']['moeny']['cart_to_Cart_btn'], 'callback_data' => "none"],
+            ],
+            [
+                ['text' => $status_auto_verify, 'callback_data' => "editpay-auto_verify-" . $sqlstatus_auto_verify],
+                ['text' => "تایید خودکار کارت به کارت", 'callback_data' => "none"],
             ],
             [
                 ['text' => $textbotlang['users']['moeny']['setting'], 'callback_data' => "SettingnowPayment"],

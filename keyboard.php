@@ -129,6 +129,7 @@ $setting_panel = json_encode([
     'resize_keyboard' => true
 ]);
 $PaySettingcard = select("PaySetting", "ValuePay", "NamePay", 'Cartstatus', "select")['ValuePay'];
+$PaySettingauto = select("PaySetting", "ValuePay", "NamePay", 'status_auto_verify', "select")['ValuePay'] ?? 'onauto_verify';
 $PaySettingnow = select("PaySetting", "ValuePay", "NamePay", 'nowpaymentstatus', "select")['ValuePay'];
 $PaySettingdigi = select("PaySetting", "ValuePay", "NamePay", 'digistatus', "select")['ValuePay'];
 $PaySettingaqayepardakht = select("PaySetting", "ValuePay", "NamePay", 'statusaqayepardakht', "select")['ValuePay'];
@@ -432,14 +433,17 @@ if ($table_exists) {
     }
     $json_list_Discount_list_admin_sell = json_encode($list_Discountsell);
 }
-$payment = json_encode([
-    'inline_keyboard' => [
-        [['text' => '💳 انتخاب روش پرداخت', 'callback_data' => 'none']],
-        [['text' => '⚡ پرداخت با تایید خودکار', 'callback_data' => 'pay_auto_verify']],
-        [['text' => '🧾 پرداخت با ارسال رسید', 'callback_data' => 'pay_manual_receipt']],
-        [['text' => $textbotlang['users']['backhome'], 'callback_data' => "backuser"]]
-    ]
-]);
+$payment_buttons = [
+    [['text' => '💳 انتخاب روش پرداخت', 'callback_data' => 'none']]
+];
+if ($PaySettingauto == "onauto_verify") {
+    $payment_buttons[] = [['text' => '⚡ پرداخت با تایید خودکار', 'callback_data' => 'pay_auto_verify']];
+}
+if ($PaySettingcard == "oncard") {
+    $payment_buttons[] = [['text' => '🧾 پرداخت با ارسال رسید', 'callback_data' => 'pay_manual_receipt']];
+}
+$payment_buttons[] = [['text' => $textbotlang['users']['backhome'], 'callback_data' => "backuser"]];
+$payment = json_encode(['inline_keyboard' => $payment_buttons]);
 $change_product = json_encode([
     'keyboard' => [
         [['text' => $textbotlang['Admin']['Product']['editprice']], ['text' => $textbotlang['Admin']['Product']['editvolume']], ['text' => $textbotlang['Admin']['Product']['edittime']]],
